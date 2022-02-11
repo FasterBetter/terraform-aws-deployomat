@@ -151,17 +151,17 @@ A minimum viable service setup could be
 
 ```hcl
 variable "instance_type" {
-  description = "The EC2 instance type this service should be deployed to".
+  description = "The EC2 instance type this service should be deployed to."
   type        = string
 }
 
 variable "min_instances" {
-  description = "The minimum number of instances this service should run on"
+  description = "The minimum number of instances this service should run on."
   type        = number
 }
 
 variable "max_instances" {
-  description = "The maximum number of instances this service should run on"
+  description = "The maximum number of instances this service should run on."
   type        = number
 }
 
