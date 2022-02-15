@@ -134,6 +134,7 @@ resource "aws_ssm_parameter" "cancel_sfn_arn" {
 ```
 
 While all resources can be provisioned into a single account, Deployomat is intended to be used in a multi-account organization containing at a minimum the following account types:
+
 - Workload account, which contains production user facing services. The deployomat_deploy_access module should be provisioned in every workload account which Deployomat can deploy to.
 - CI/CD account, which contains CI/CD related tooling. The deployomat, deployer_role, and slack_notify modules should be provisioned in every CI/CD account.
 - Meta/Config account, which contains SSM parameters for all accounts. Deployomat looks for the following SSM parameters
@@ -265,6 +266,7 @@ resource "aws_autoscaling_group" "asg" {
 ```
 
 For a web service behind an Application Load Balancer, Deployomat additionally requires
+
 - An existing rule on all listeners with its priority offset by 40,000 from the desired rule priority. Deployomat will clone this rule and subtract 40,000 from its priority as part of the initial deploy. Deployomat will _NOT_ copy any modifications made to the rule after the initial deploy.
 - A target group associated with the template ASG
 - A list of Application Load Balancer listener arns published under `/${organization_prefix}/${environment}/${account_name}/config/${service_name}/listener_arns` in the account containing the meta_access_role module.
@@ -368,6 +370,7 @@ If the deployed EC2 instances have an IAM role associated with them, the IAM rol
 Deployomat is intended to be used by assuming the role configured by the deployer_role module and then starting the deploy_sfn AWS Step Functions state machine. The minimal input is a JSON document containing AccountName, ServiceName, and AmiId keys. For example, using the aws cli, `aws stepfunctions start-execution --state-machine-arn <DEPLOY_SFN_ARN> --input '{"AccountName":"workload-dev-0001", "ServiceName":"example", "AmiId": "ami-xxxx"}'`
 
 Additional deploy options may be configured under a `DeployConfig` in the input. The following parameters are supported
+
 - `DeployConfig.BakeTime` controls how long Deployomat will pause after a deploy is complete before tearing down the previous deploy in seconds. The default is 60.
 - `DeployConfig.TrafficShiftPerStep` controls the percentage of traffic away from the previous deployment to the new deployment during rollout of web services. The default is 5.
 - `DeployConfig.WaitPerStep` controls how long Deployomat will wait between each traffic shift during rollout of web services in seconds. The default is 15.
