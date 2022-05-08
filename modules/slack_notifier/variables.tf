@@ -43,6 +43,14 @@ variable "deploy_sfn" {
   description = "The deployment step functions state machine."
 }
 
+variable "undeploy_sfn" {
+  type = object({
+    arn  = string
+    name = string
+  })
+  description = "The undeploy step functions state machine."
+}
+
 variable "lambda_iam_role_arn" {
   type        = string
   description = "The ARN of an IAM role to assign to the created lambda. The only required permissions are for logging. If null, this module will create a suitable IAM role and policy."
@@ -65,4 +73,16 @@ variable "tags" {
   type        = map(string)
   description = "Tags to apply to all resources. Will be deduplicated from default tags."
   default     = {}
+}
+
+variable "techno" {
+  type        = bool
+  description = "Play some hot techno beats on undeployment."
+  default     = false
+}
+
+variable "hot_techno_beats" {
+  type        = string
+  description = "A link to the hot techno beats to play on undeployment."
+  default     = "https://www.youtube.com/watch?v=Z1TlbLfaJp8"
 }

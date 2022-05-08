@@ -22,6 +22,11 @@ variable "cancel_sfn_arn" {
   description = "ARN of the step function state machine for cancelling deploys."
 }
 
+variable "undeploy_sfn_arn" {
+  type        = string
+  description = "ARN of the step function state machine for undeploying services."
+}
+
 variable "user_account_ids" {
   type        = list(string)
   description = "AWS account id to delegate trust to for starting and stopping deploys."
@@ -42,4 +47,10 @@ variable "tags" {
   type        = map(string)
   description = "Tags to apply to all resources. Will be deduplicated from default tags."
   default     = {}
+}
+
+variable "role_name" {
+  type        = string
+  description = "The name of the role created for performing deploys."
+  default     = "Deployer"
 }

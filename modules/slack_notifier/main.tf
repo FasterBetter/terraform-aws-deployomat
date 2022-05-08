@@ -16,7 +16,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 3"
+      version = ">= 3, < 5"
     }
 
     archive = {
@@ -30,8 +30,8 @@ locals {
   lambda_name  = var.lambda_name
   logs_arn     = "arn:${data.aws_partition.current.partition}:logs:*:${data.aws_caller_identity.current.id}:log-group:/aws/lambda/${local.lambda_name}"
   iam_role_arn = coalesce(var.lambda_iam_role_arn, try(aws_iam_role.slack-notify[0].arn))
-  our_tags = var.tags
-  tags     = {for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key) != value}
+  our_tags     = var.tags
+  tags         = { for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key, null) != value }
 }
 
 data "aws_partition" "current" {}
@@ -123,8 +123,12 @@ resource "aws_lambda_function" "deployomat-slack-notify" {
 
   environment {
     variables = {
-      SLACK_CHANNEL   = var.slack_notification_channel
-      SLACK_BOT_TOKEN = var.slack_bot_token
+      SLACK_CHANNEL    = var.slack_notification_channel
+      SLACK_BOT_TOKEN  = var.slack_bot_token
+      DEPLOY_SFN_ARN   = var.deploy_sfn.arn
+      UNDEPLOY_SFN_ARN = var.undeploy_sfn.arn
+      UNDEPLOY_TECHNO  = var.techno ? "true" : "false"
+      TECHNO_BEATS     = var.hot_techno_beats
     }
   }
 
@@ -138,13 +142,13 @@ resource "aws_lambda_function" "deployomat-slack-notify" {
 
 resource "aws_cloudwatch_event_rule" "deploy-run" {
   name        = "${var.deploy_sfn.name}Executions"
-  description = "Matches all execution state changes on ${var.deploy_sfn.name}"
+  description = "Matches all execution state changes on ${var.deploy_sfn.name} or ${var.undeploy_sfn.name}"
 
   event_pattern = jsonencode({
     source      = ["aws.states"],
     detail-type = ["Step Functions Execution Status Change"],
     detail = {
-      stateMachineArn = [var.deploy_sfn.arn]
+      stateMachineArn = [var.deploy_sfn.arn, var.undeploy_sfn.arn]
     }
   })
 

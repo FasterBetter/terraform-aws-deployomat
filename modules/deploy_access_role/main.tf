@@ -16,15 +16,15 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 3"
+      version = ">= 3, < 5"
     }
   }
 }
 
 locals {
   default_service_tag = lookup(data.aws_default_tags.tags.tags, "Service", null)
-  our_tags = merge(var.tags, { Service = var.deployomat_service_name })
-  tags     = {for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key) != value}
+  our_tags            = merge(var.tags, { Service = var.deployomat_service_name })
+  tags                = { for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key, null) != value }
 }
 
 data "aws_partition" "current" {}
@@ -110,7 +110,9 @@ data "aws_iam_policy_document" "allow-deploy" {
       "autoscaling:DescribePolicies",
       "autoscaling:DescribeTags",
       "autoscaling:DescribeWarmPool",
-      "autoscaling:DescribeLifecycleHooks"
+      "autoscaling:DescribeLifecycleHooks",
+      "ec2:DescribeLaunchTemplateVersions",
+      "ec2:DescribeImages"
     ]
 
     resources = [
@@ -119,7 +121,11 @@ data "aws_iam_policy_document" "allow-deploy" {
   }
 
   statement {
-    actions = ["ec2:CreateLaunchTemplateVersion"]
+    actions = [
+      "ec2:CreateLaunchTemplateVersion",
+      "ec2:ModifyLaunchTemplate"
+    ]
+
     resources = [
       "arn:${data.aws_partition.current.partition}:ec2:*:${data.aws_caller_identity.current.id}:launch-template/*"
     ]
@@ -128,7 +134,8 @@ data "aws_iam_policy_document" "allow-deploy" {
   statement {
     actions = [
       "elasticloadbalancing:ModifyRule",
-      "elasticloadbalancing:ModifyTargetGroupAttributes"
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:DeleteRule"
     ]
 
     resources = [
@@ -234,7 +241,9 @@ data "aws_iam_policy_document" "allow-deploy" {
       # https://web.archive.org/web/20201112013446/https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/elb-api-permissions.html
       # Apparently ElasticLoadBalancing needs these
       "ec2:DescribeInternetGateways",
-      "ec2:DescribeVpcs"
+      "ec2:DescribeVpcs",
+      # This is needed for launch templates which have tags on them
+      "ec2:CreateTags",
     ]
 
     resources = [

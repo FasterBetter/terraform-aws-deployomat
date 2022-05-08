@@ -17,6 +17,7 @@
 require_relative 'lib'
 require_relative 'cancel'
 require_relative 'deploy'
+require_relative 'undeploy'
 
 require 'json'
 
@@ -24,7 +25,7 @@ module LambdaFunctions
   class Handler
     def self.cancel(event:, context:)
       args = {
-        account_name: event['AccountName'], service_name: event['ServiceName'],
+        account_canonical_slug: event['AccountCanonicalSlug'], service_name: event['ServiceName'],
         deploy_id: "cancel-#{event['DeployId']}"
       }
       config = Deployomat::Config.new(args)
@@ -39,7 +40,7 @@ module LambdaFunctions
 
     def self.deploy(event:, context:)
       args = {
-        account_name: event['AccountName'], service_name: event['ServiceName'],
+        account_canonical_slug: event['AccountCanonicalSlug'], service_name: event['ServiceName'],
         deploy_id: "deploy-#{event['DeployId']}"
       }
       config = Deployomat::Config.new(args)
@@ -70,9 +71,19 @@ module LambdaFunctions
           )
         when 'Finish'
           Deployomat::FinishDeploy.new(
-            config
+            config, allow_undeploy: event['AllowUndeploy'], automatic_undeploy_minutes: event['AutomaticUndeployMinutes']
           )
         end
+      op.call
+    end
+
+    def self.undeploy(event:, context:)
+      args = {
+        account_canonical_slug: event['AccountCanonicalSlug'], service_name: event['ServiceName'],
+        deploy_id: "undeploy-#{event['DeployId']}"
+      }
+      config = Deployomat::Config.new(args)
+      op = Deployomat::Undeploy.new(config, undeploy_config: event.dig('AllInput', 'UndeployConfig'))
       op.call
     end
   end

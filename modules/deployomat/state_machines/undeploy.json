@@ -1,0 +1,100 @@
+{
+  "Comment": "Undeploy a running service. Required inputs are AccountCanonicalSlug and ServiceName (to undeploy/destroy ServiceName in AccountCanonicalSlug)",
+  "StartAt": "StartUndeploy",
+  "States": {
+    "StartUndeploy": {
+      "Type": "Task",
+      "Parameters": {
+        "AccountCanonicalSlug.$": "$.AccountCanonicalSlug",
+        "ServiceName.$": "$.ServiceName",
+        "DeployId.$": "$$.Execution.Name",
+        "AllInput.$": "$"
+      },
+      "ResultPath": "$.StartResult",
+      "Resource": "${undeploy_lambda_arn}",
+      "Next": "StartBranch"
+    },
+    "StartBranch": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.StartResult.Status",
+          "StringEquals": "fail",
+          "Next": "KnownError"
+        },
+        {
+          "Variable": "$.StartResult.Status",
+          "StringEquals": "deploy_active",
+          "Next": "HandleConcurrentDeploy"
+        },
+        {
+          "Variable": "$.StartResult.Status",
+          "StringEquals": "complete",
+          "Next": "Success"
+        }
+      ],
+      "Default": "Fail"
+    },
+    "KnownError": {
+      "Type": "Pass",
+      "End": true,
+      "Parameters": {
+        "Status": "fail",
+        "Error.$": "$.Error"
+      }
+    },
+    "Fail": {
+      "Type": "Fail"
+    },
+    "Success": {
+      "Type": "Pass",
+      "End": true,
+      "Parameters": {
+        "Status": "complete"
+      }
+    },
+    "HandleConcurrentDeploy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.StartResult.OnConcurrentDeploy",
+          "StringEquals": "fail",
+          "Next": "FailConcurrentDeploy"
+        }
+      ],
+      "Default": "CancelConcurrentDeploy"
+    },
+    "FailConcurrentDeploy": {
+      "Type": "Pass",
+      "End": true,
+      "Parameters": {
+        "Status": "fail",
+        "Error": [
+          "A deploy is running concurrently, and this undeploy was configured to fail in such a case."
+        ]
+      }
+    },
+    "CancelConcurrentDeploy": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::states:startExecution.sync:2",
+      "Parameters": {
+        "StateMachineArn": "${cancel_deploy_state_machine_arn}",
+        "Input": {
+          "AccountCanonicalSlug.$": "$.AccountCanonicalSlug",
+          "ServiceName.$": "$.ServiceName",
+          "Comment.$": "States.Format('Cancelling concurrent deploy of {} in {}', $.ServiceName, $.AccountCanonicalSlug)",
+          "AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID.$": "$$.Execution.Id"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "StepFunctions.ExecutionLimitExceeded"
+          ]
+        }
+      ],
+      "ResultPath": null,
+      "Next": "StartUndeploy"
+    }
+  }
+}

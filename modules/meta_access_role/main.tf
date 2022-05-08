@@ -16,14 +16,14 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 3"
+      version = ">= 3, < 5"
     }
   }
 }
 
 locals {
   our_tags = merge(var.tags, { Service = var.deployomat_service_name })
-  tags     = {for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key) != value}
+  tags     = { for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key, null) != value }
 }
 
 data "aws_partition" "current" {}
@@ -75,6 +75,7 @@ data "aws_iam_policy_document" "allow-ssm-read" {
   statement {
     actions = ["ssm:GetParameter"]
     resources = [
+      "arn:${data.aws_partition.current.partition}:ssm:*:${data.aws_caller_identity.current.id}:parameter/omat/account_registry/*",
       "arn:${data.aws_partition.current.partition}:ssm:*:${data.aws_caller_identity.current.id}:parameter/${var.organization_prefix}/&{aws:PrincipalTag/Environment}/*/config/*",
       "arn:${data.aws_partition.current.partition}:ssm:*:${data.aws_caller_identity.current.id}:parameter/${var.organization_prefix}/&{aws:PrincipalTag/Environment}/*/roles/${var.deployomat_service_name}",
     ]

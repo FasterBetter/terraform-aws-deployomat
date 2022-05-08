@@ -13,10 +13,12 @@
 # limitations under the License.
 
 terraform {
+  required_version = ">= 1.1"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 3"
+      version = ">= 3, < 5"
     }
 
     archive = {
@@ -28,7 +30,6 @@ terraform {
 
 data "aws_partition" "current" {}
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 data "aws_default_tags" "tags" {}
 
 locals {
@@ -43,7 +44,9 @@ locals {
   )
 
   our_tags = merge(var.tags, { Service = local.service, Environment = local.environment })
-  tags     = {for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key) != value}
+  tags     = { for key, value in local.our_tags : key => value if lookup(data.aws_default_tags.tags.tags, key, null) != value }
+
+  ami_owner_account_ids = join(",", coalesce(var.ami_owner_account_ids, [data.aws_caller_identity.current.id]))
 }
 
 resource "aws_dynamodb_table" "state" {
@@ -77,6 +80,10 @@ resource "aws_iam_policy" "deployomat-lambda-logging" {
   description = "Allows logging to ${local.service} lambda log groups."
 
   tags = local.tags
+}
+
+locals {
+  automatic_undeploy_rule_arn = "arn:${data.aws_partition.current.partition}:events:*:${data.aws_caller_identity.current.account_id}:rule/*-automatic-undeploy"
 }
 
 data "aws_iam_policy_document" "deployomat-lambda" {
@@ -137,6 +144,107 @@ data "aws_iam_policy_document" "deployomat-lambda" {
       "${aws_dynamodb_table.state.arn}/*"
     ]
   }
+
+  statement {
+    actions = [
+      "events:PutRule",
+      "events:TagResource"
+    ]
+
+    resources = [local.automatic_undeploy_rule_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Environment"
+      values   = ["&{aws:PrincipalTag/Environment}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Managed"
+      values   = [local.service]
+    }
+  }
+
+  statement {
+    actions = [
+      "events:RemoveTargets",
+      "events:DeleteRule"
+    ]
+
+    resources = [local.automatic_undeploy_rule_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = ["&{aws:PrincipalTag/Environment}"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Managed"
+      values   = [local.service]
+    }
+  }
+
+  statement {
+    actions = [
+      "events:PutTargets"
+    ]
+
+    resources = [local.automatic_undeploy_rule_arn]
+
+    # I would desperately love to have ABAC control here to ensure that this policy only permits
+    # putting targets on rules which are managed by local.service. However, in testing, IAM appeared
+    # to need a _significant_ delay to actually see the tags on the new rule. The API could see them
+    # immediately, just not IAM. So... here we are.
+
+    # condition {
+    #   test = "StringEquals"
+    #   variable = "aws:ResourceTag/Environment"
+    #   values = ["&{aws:PrincipalTag/Environment}"]
+    # }
+
+    # condition {
+    #   test = "StringEquals"
+    #   variable = "aws:ResourceTag/Managed"
+    #   values = [local.service]
+    # }
+
+    condition {
+      test     = "ForAllValues:ArnEquals"
+      variable = "events:TargetArn"
+      values   = [aws_sfn_state_machine.undeploy.arn]
+    }
+  }
+
+  statement {
+    actions = [
+      "events:DescribeRule"
+    ]
+
+    resources = [local.automatic_undeploy_rule_arn]
+  }
+
+  statement {
+    actions = [
+      "iam:PassRole"
+    ]
+
+    resources = [aws_iam_role.automatic-undeployer.arn]
+
+    condition {
+      test     = "ArnLike"
+      variable = "iam:AssociatedResourceArn"
+      values   = [local.automatic_undeploy_rule_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["events.${data.aws_partition.current.dns_suffix}"]
+    }
+  }
 }
 
 resource "aws_iam_policy" "deployomat-lambda" {
@@ -168,15 +276,70 @@ resource "aws_iam_role" "deployomat" {
   tags = local.tags
 }
 
-resource "aws_iam_role_policy_attachment" "deployomat" {
-  for_each = { deploy = aws_iam_policy.deployomat-lambda, logging = aws_iam_policy.deployomat-lambda-logging }
+data "aws_iam_policy_document" "allow-events-assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
 
+    principals {
+      type        = "Service"
+      identifiers = ["events.${data.aws_partition.current.dns_suffix}"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "allow-invoke-undeploy" {
+  statement {
+    actions = ["states:StartExecution"]
+
+    resources = [aws_sfn_state_machine.undeploy.arn]
+  }
+}
+
+resource "aws_iam_policy" "allow-invoke-undeploy" {
+  name   = "AutomaticUndployer"
+  policy = data.aws_iam_policy_document.allow-invoke-undeploy.json
+
+  description = "Allows invoking the undeploy state machine."
+
+  tags = local.tags
+}
+
+resource "aws_iam_role" "automatic-undeployer" {
+  name               = "${local.service}-AutomaticUndeployer"
+  assume_role_policy = data.aws_iam_policy_document.allow-events-assume.json
+
+  description = "Role for EventBridge to assume to invoke the undeploy step function"
+
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "allow-invoke-undeploy" {
+  role       = aws_iam_role.automatic-undeployer.name
+  policy_arn = aws_iam_policy.allow-invoke-undeploy.arn
+}
+
+moved {
+  from = aws_iam_role_policy_attachment.deployomat["logging"]
+  to   = aws_iam_role_policy_attachment.deployomat-logging
+}
+
+moved {
+  from = aws_iam_role_policy_attachment.deployomat["deploy"]
+  to   = aws_iam_role_policy_attachment.deployomat-deploy
+}
+
+resource "aws_iam_role_policy_attachment" "deployomat-logging" {
   role       = aws_iam_role.deployomat.name
-  policy_arn = each.value.arn
+  policy_arn = aws_iam_policy.deployomat-lambda-logging.arn
+}
+
+resource "aws_iam_role_policy_attachment" "deployomat-deploy" {
+  role       = aws_iam_role.deployomat.name
+  policy_arn = aws_iam_policy.deployomat-lambda.arn
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
-  for_each = toset(["DeployomatCancel", "DeployomatDeploy"])
+  for_each = toset(["DeployomatCancel", "DeployomatDeploy", "DeployomatUndeploy"])
 
   name              = "/aws/lambda/${each.key}"
   retention_in_days = var.log_retention_in_days
@@ -205,7 +368,6 @@ resource "aws_lambda_function" "deployomat-cancel" {
 
   environment {
     variables = {
-      DEPLOYOMAT_ORG_PREFIX    = var.organization_prefix,
       DEPLOYOMAT_META_ROLE_ARN = var.deployomat_meta_role_arn,
       DEPLOYOMAT_ENV           = local.environment,
       DEPLOYOMAT_TABLE         = aws_dynamodb_table.state.name
@@ -216,7 +378,7 @@ resource "aws_lambda_function" "deployomat-cancel" {
   tags = local.tags
 
   depends_on = [
-    aws_iam_role_policy_attachment.deployomat,
+    aws_iam_role_policy_attachment.deployomat-logging,
     aws_cloudwatch_log_group.lambda
   ]
 }
@@ -236,7 +398,39 @@ resource "aws_lambda_function" "deployomat-deploy" {
 
   environment {
     variables = {
-      DEPLOYOMAT_ORG_PREFIX    = var.organization_prefix,
+      DEPLOYOMAT_META_ROLE_ARN = var.deployomat_meta_role_arn
+      DEPLOYOMAT_ENV           = local.environment
+      DEPLOYOMAT_TABLE         = aws_dynamodb_table.state.name
+      DEPLOYOMAT_SERVICE_NAME  = local.service
+      UNDEPLOY_SFN_ARN         = aws_sfn_state_machine.undeploy.arn
+      UNDEPLOYER_ROLE_ARN      = aws_iam_role.automatic-undeployer.arn
+      DEPLOYOMAT_AMI_SEARCH_OWNERS = local.ami_owner_account_ids
+    }
+  }
+
+  tags = local.tags
+
+  depends_on = [
+    aws_iam_role_policy_attachment.deployomat-logging,
+    aws_cloudwatch_log_group.lambda
+  ]
+}
+
+resource "aws_lambda_function" "deployomat-undeploy" {
+  function_name    = "DeployomatUndeploy"
+  role             = aws_iam_role.deployomat.arn
+  architectures    = ["arm64"]
+  memory_size      = 512
+  runtime          = "ruby2.7"
+  filename         = data.archive_file.deployomat.output_path
+  source_code_hash = filebase64sha256(data.archive_file.deployomat.output_path)
+  handler          = "lambda_handlers.LambdaFunctions::Handler.undeploy"
+  publish          = true
+
+  timeout = 60
+
+  environment {
+    variables = {
       DEPLOYOMAT_META_ROLE_ARN = var.deployomat_meta_role_arn,
       DEPLOYOMAT_ENV           = local.environment,
       DEPLOYOMAT_TABLE         = aws_dynamodb_table.state.name
@@ -247,7 +441,7 @@ resource "aws_lambda_function" "deployomat-deploy" {
   tags = local.tags
 
   depends_on = [
-    aws_iam_role_policy_attachment.deployomat,
+    aws_iam_role_policy_attachment.deployomat-logging,
     aws_cloudwatch_log_group.lambda
   ]
 }
@@ -289,7 +483,7 @@ data "aws_iam_policy_document" "aws-log-delivery" {
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
-      values   = ["arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"]
+      values   = ["arn:${data.aws_partition.current.partition}:logs:*:${data.aws_caller_identity.current.account_id}:*"]
     }
   }
 }
@@ -338,7 +532,8 @@ data "aws_iam_policy_document" "deployomat-sfn" {
 
     resources = [
       aws_lambda_function.deployomat-cancel.arn,
-      aws_lambda_function.deployomat-deploy.arn
+      aws_lambda_function.deployomat-deploy.arn,
+      aws_lambda_function.deployomat-undeploy.arn
     ]
   }
 
@@ -347,7 +542,7 @@ data "aws_iam_policy_document" "deployomat-sfn" {
       "states:StartExecution"
     ]
 
-    resources = ["arn:${data.aws_partition.current.partition}:states:${data.aws_region.current.name}:${data.aws_caller_identity.current.id}:stateMachine:*"]
+    resources = ["arn:${data.aws_partition.current.partition}:states:*:${data.aws_caller_identity.current.id}:stateMachine:*"]
 
     condition {
       test     = "StringEquals"
@@ -373,7 +568,7 @@ data "aws_iam_policy_document" "deployomat-sfn" {
     ]
 
     resources = [
-      "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.name}:${data.aws_caller_identity.current.id}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
+      "arn:${data.aws_partition.current.partition}:events:*:${data.aws_caller_identity.current.id}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
     ]
   }
 }
@@ -456,6 +651,30 @@ resource "aws_sfn_state_machine" "deploy" {
       deploy_lambda_arn                 = aws_lambda_function.deployomat-deploy.arn,
       loop_wait_state_state_machine_arn = aws_sfn_state_machine.loop-wait-state.arn,
       cancel_deploy_state_machine_arn   = aws_sfn_state_machine.cancel-deploy.arn
+    }
+  )
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.sfn.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+
+  tags = local.tags
+
+  depends_on = [
+    aws_cloudwatch_log_resource_policy.deployomat-logging
+  ]
+}
+
+resource "aws_sfn_state_machine" "undeploy" {
+  name     = "Deployomat-Undeploy"
+  role_arn = aws_iam_role.deployomat-sfn.arn
+  definition = templatefile(
+    "${path.module}/state_machines/undeploy.json",
+    {
+      undeploy_lambda_arn             = aws_lambda_function.deployomat-undeploy.arn,
+      cancel_deploy_state_machine_arn = aws_sfn_state_machine.cancel-deploy.arn
     }
   )
 

@@ -18,11 +18,14 @@ require 'aws-sdk-autoscaling'
 require 'aws-sdk-dynamodb'
 require 'aws-sdk-ec2'
 require 'aws-sdk-elasticloadbalancingv2'
+require 'aws-sdk-eventbridge'
 require 'aws-sdk-ssm'
+
+require 'json'
 
 module Deployomat
   MANAGED_TAG = ENV['DEPLOYOMAT_SERVICE_NAME']
-  ORG_PREFIX = ENV['DEPLOYOMAT_ORG_PREFIX']
+  DEPLOY_ROLE_NAME = ENV['DEPLOYOMAT_SERVICE_NAME']
 
   class CredentialCache
     def self.meta_role_credentials(deploy_id)
@@ -30,7 +33,7 @@ module Deployomat
       @meta_role_credentials[deploy_id] ||= begin
         Aws::AssumeRoleCredentials.new(
           role_arn: ENV['DEPLOYOMAT_META_ROLE_ARN'],
-          role_session_name: deploy_id,
+          role_session_name: deploy_id[0...64],
           tags: [
             {
               key: 'Environment',
@@ -50,7 +53,7 @@ module Deployomat
       our_role_creds[deploy_id] ||= begin
         Aws::AssumeRoleCredentials.new(
           role_arn: role_arn,
-          role_session_name: deploy_id
+          role_session_name: deploy_id[0...64]
         )
       end
     end
@@ -71,21 +74,48 @@ module Deployomat
         ret&.value
       end
     end
+
+    def get_list_or_json(name)
+      ret = @client.get_parameter(name: name)&.parameter
+      if ret&.type == "StringList"
+        ret.value.split(",").map(&:strip)
+      else
+        JSON.parse(ret&.value)
+      end
+    end
   end
 
   class Config
-    attr_reader :account_name, :service_name, :prefix, :deploy_id, :params
+    UNDEPLOYING = 'undeploying'
+    ALLOW = 'allow'
 
-    def initialize(account_name:, service_name:, deploy_id:, account_env: nil)
+    attr_reader :account_canonical_slug, :account_name, :service_name, :prefix,
+                :deploy_id, :params, :organization_prefix, :account_environment,
+                :primary_key
+
+    def initialize(account_canonical_slug:, service_name:, deploy_id:)
       @client = Aws::DynamoDB::Client.new
-      @account_name = account_name
+      @account_canonical_slug = account_canonical_slug
       @service_name = service_name
-      @account_env = account_env || ENV['DEPLOYOMAT_ENV']
-      @prefix = "/#{ENV['DEPLOYOMAT_ORG_PREFIX']}/#{@account_env}/#{@account_name}"
-      @primary_key = "#{account_name}.#{service_name}"
-      @deploy_id = deploy_id
       @params = Parameters.new(deploy_id)
+      account_info = begin
+        JSON.parse(params.get("/omat/account_registry/#{@account_canonical_slug}"), symbolize_names: true)
+      rescue Aws::SSM::ParameterNotFound
+        raise "Unable to locate account information for #{@account_canonical_slug}"
+      end
+
+      @prefix = account_info[:prefix]
+      @organization_prefix = @prefix.split('/').reject(&:empty?)[0]
+      @account_name = account_info[:name]
+      @account_environment = account_info[:environment]
+      @primary_key = "#{account_canonical_slug}.#{service_name}"
+      @deploy_id = deploy_id
+
       reload
+    end
+
+    def deploy_role_arn
+      @deploy_role_arn ||= params.get("#{prefix}/roles/#{DEPLOY_ROLE_NAME}")
     end
 
     def reload
@@ -102,6 +132,14 @@ module Deployomat
 
     def deploy_asg
       @config&.fetch('deploy_asg_name', nil)
+    end
+
+    def undeploying?
+      @config&.fetch('undeploy_state', '') == UNDEPLOYING
+    end
+
+    def undeployable?
+      @config&.fetch('undeploy_state', '') == ALLOW
     end
 
     def assert_start_cancel
@@ -129,18 +167,59 @@ module Deployomat
         return_values: 'ALL_NEW',
         key: { 'id' => @primary_key },
         update_expression: 'SET #DEPLOY_ID = :new_deploy_id, #DEPLOY_ASG = :deploy_asg',
-        condition_expression: '(attribute_not_exists(#DEPLOY_ID) OR #DEPLOY_ID = :old_deploy_id) AND (attribute_not_exists(#DEPLOY_ASG) OR #DEPLOY_ASG = :empty)',
+        condition_expression: '(attribute_not_exists(#DEPLOY_ID) OR #DEPLOY_ID = :old_deploy_id) AND (attribute_not_exists(#DEPLOY_ASG) OR #DEPLOY_ASG = :empty) AND (attribute_not_exists(#UNDEPLOY_STATE) OR #UNDEPLOY_STATE <> :undeploying)',
         expression_attribute_names: {
           '#DEPLOY_ID' => 'deploy_id',
-          '#DEPLOY_ASG' => 'deploy_asg_name'
+          '#DEPLOY_ASG' => 'deploy_asg_name',
+          '#UNDEPLOY_STATE' => 'undeploy_state'
         },
         expression_attribute_values: {
           ':new_deploy_id' => @deploy_id,
           ':old_deploy_id' => @config&.fetch('deploy_id', nil),
           ':empty' => '',
-          ':deploy_asg' => name
+          ':deploy_asg' => name,
+          ':undeploying' => UNDEPLOYING
         }
       ).attributes
+    end
+
+    def assert_start_undeploy
+      @config = @client.update_item(
+        table_name: ENV['DEPLOYOMAT_TABLE'],
+        return_values: 'ALL_NEW',
+        key: { 'id' => @primary_key },
+        update_expression: 'SET #DEPLOY_ID = :new_deploy_id, #UNDEPLOY_STATE = :undeploying',
+        condition_expression: '(attribute_not_exists(#DEPLOY_ID) OR #DEPLOY_ID = :old_deploy_id) AND (attribute_not_exists(#DEPLOY_ASG) OR #DEPLOY_ASG = :empty) AND (#UNDEPLOY_STATE = :allow OR #UNDEPLOY_STATE = :undeploying)',
+        expression_attribute_names: {
+          '#DEPLOY_ID' => 'deploy_id',
+          '#DEPLOY_ASG' => 'deploy_asg',
+          '#UNDEPLOY_STATE' => 'undeploy_state'
+        },
+        expression_attribute_values: {
+          ':new_deploy_id' => @deploy_id,
+          ':old_deploy_id' => @config&.fetch('deploy_id', nil),
+          ':empty' => '',
+          ':undeploying' => UNDEPLOYING,
+          ':allow' => ALLOW
+        }
+      ).attributes
+    end
+
+    def complete_undeploy
+      @config = @client.delete_item(
+        table_name: ENV['DEPLOYOMAT_TABLE'],
+        return_values: 'ALL_OLD',
+        key: { 'id' => @primary_key },
+        condition_expression: '(attribute_not_exists(#DEPLOY_ID) OR #DEPLOY_ID = :deploy_id) AND (attribute_not_exists(#UNDEPLOY_STATE) OR #UNDEPLOY_STATE = :undeploying)',
+        expression_attribute_names: {
+          '#DEPLOY_ID' => 'deploy_id',
+          '#UNDEPLOY_STATE' => 'undeploy_state'
+        },
+        expression_attribute_values: {
+          ':deploy_id' => @deploy_id,
+          ':undeploying' => UNDEPLOYING
+        }
+      )
     end
 
     def assert_active
@@ -159,32 +238,72 @@ module Deployomat
       ).attributes
     end
 
-    def set_production_asg(name)
+    def set_production_asg(name, allow_undeploy: nil)
+      allow_undeploy = undeploying? || undeployable? if allow_undeploy.nil?
+
       @config = @client.update_item(
         table_name: ENV['DEPLOYOMAT_TABLE'],
         return_values: 'ALL_NEW',
         key: { 'id' => @primary_key },
-        update_expression: 'SET #PROD_ASG = :prod_asg, #DEPLOY_ASG = :empty',
+        update_expression: 'SET #PROD_ASG = :prod_asg, #DEPLOY_ASG = :empty, #UNDEPLOY_STATE = :undeploy_state',
         condition_expression: '#DEPLOY_ID = :deploy_id',
         expression_attribute_names: {
           '#DEPLOY_ID' => 'deploy_id',
           '#PROD_ASG' => 'production_asg_name',
-          '#DEPLOY_ASG' => 'deploy_asg_name'
+          '#DEPLOY_ASG' => 'deploy_asg_name',
+          '#UNDEPLOY_STATE' => 'undeploy_state'
         },
         expression_attribute_values: {
           ':deploy_id' => @deploy_id,
           ':prod_asg' => name,
-          ':empty' => ''
+          ':empty' => '',
+          ':undeploy_state' => allow_undeploy ? ALLOW : ''
         }
       ).attributes
     end
   end
 
   class Ec2
-    def initialize(role_arn, deploy_id)
+    def initialize(config)
       @client = Aws::EC2::Client.new(
-        credentials: CredentialCache.role_credentials(role_arn, deploy_id)
+        credentials: CredentialCache.role_credentials(config.deploy_role_arn, config.deploy_id)
       )
+    end
+
+    def launch_template_version(launch_template_id, version, offset)
+      if version != '$LatestMinus'
+        @client.describe_launch_template_versions(
+          launch_template_id: launch_template_id,
+          versions: [version]
+        ).launch_template_versions.first
+      else
+        latest_version = @client.describe_launch_template_versions(
+          launch_template_id: launch_template_id,
+          versions: ['$Latest']
+        ).launch_template_versions.first.version_number
+        version = (latest_version.to_i - offset.to_i).to_s
+        launch_template_version(launch_template_id, version, nil)
+      end
+    end
+
+    def latest_ami_for_name_prefix(name_prefix)
+      owners = ENV['DEPLOYOMAT_AMI_SEARCH_OWNERS']&.split(',')
+      if !owners || owners.empty?
+        raise "Must specify AWS account ids which can build AMIs in DEPLOYOMAT_AMI_SEARCH_OWNERS"
+      end
+
+      images = @client.describe_images(
+        executable_users: ['self'],
+        filters: [
+          {
+            name: 'state',
+            values: ['available']
+          }
+        ],
+        owners: owners
+      ).images
+      images.select! { |img| img.name.start_with?(name_prefix) }
+      images.sort_by! { |img| img.creation_date }.last
     end
 
     def create_launch_template_version(launch_template_id, ami_id)
@@ -196,22 +315,107 @@ module Deployomat
         source_version: "$Latest"
       ).launch_template_version
     end
+
+    def set_default_launch_template_version(launch_template_id, version)
+      @client.modify_launch_template(
+        launch_template_id: launch_template_id,
+        default_version: version.to_s
+      ).launch_template.default_version_number
+    end
   end
+
+  class Events
+    TARGET_NAME = 'RunUndeploy'
+
+    def initialize(config)
+      @config = config
+      @client = Aws::EventBridge::Client.new
+    end
+
+    def schedule_undeploy(time)
+      cron_expression = "cron(#{time.min} #{time.hour} #{time.day} #{time.month} ? #{time.year})"
+      undeploy_desc = "automatic undeploy of #{@config.service_name} in #{@config.account_canonical_slug}"
+      rule = @client.put_rule(
+        name: rule_name,
+        schedule_expression: cron_expression,
+        state: 'ENABLED',
+        description: "Trigger for #{undeploy_desc}",
+        tags: [
+          {
+            key: 'Environment',
+            value: ENV['DEPLOYOMAT_ENV']
+          },
+          {
+            key: 'Managed',
+            value: MANAGED_TAG
+          },
+          {
+            key: 'CostCenter',
+            value: MANAGED_TAG
+          },
+          {
+            key: 'Service',
+            value: @config.service_name
+          }
+        ]
+      )
+
+      @client.put_targets(
+        rule: rule_name,
+        targets: [
+          {
+            id: TARGET_NAME,
+            arn: ENV['UNDEPLOY_SFN_ARN'],
+            role_arn: ENV['UNDEPLOYER_ROLE_ARN'],
+            input: JSON.generate({
+              Comment: undeploy_desc,
+              ServiceName: @config.service_name,
+              AccountCanonicalSlug: @config.account_canonical_slug,
+              UndeployConfig: {
+                OnConcurrentDeploy: 'fail'
+              }
+            })
+          }
+        ]
+      )
+    end
+
+    def disable_automatic_undeploy
+      begin
+        @client.describe_rule(name: rule_name)
+        @client.remove_targets(
+          rule: rule_name,
+          ids: [TARGET_NAME]
+        )
+        @client.delete_rule(name: rule_name)
+      rescue Aws::EventBridge::Errors::ResourceNotFoundException
+        # This is fine, just means we've never scheduled an automatic undeploy.
+      end
+    end
+
+  private
+    def rule_name
+      @rule_name ||= "#{@config.primary_key}-automatic-undeploy"
+    end
+  end
+
 
   class Asg
     REMOVE_HOOK_PARAMS = %i[global_timeout auto_scaling_group_name].freeze
     REMOVE_TAG_PARAMS = %i[resource_id resource_type].freeze
     REMOVE_POLICY_PARAMS = %i[policy_arn alarms].freeze
-    DEFAULT_MIN_SIZE = 1
     DEFAULT_MAX_SIZE = 4
 
-    def initialize(role_arn, deploy_id)
+    def initialize(config)
+      @org_prefix = config.organization_prefix
       @client = Aws::AutoScaling::Client.new(
-        credentials: CredentialCache.role_credentials(role_arn, deploy_id)
+        credentials: CredentialCache.role_credentials(config.deploy_role_arn, config.deploy_id)
       )
     end
 
     def get(name)
+      return nil if name.nil? || name.empty?
+
       @client.describe_auto_scaling_groups(
         auto_scaling_group_names: [name]
       ).auto_scaling_groups.first
@@ -228,7 +432,7 @@ module Deployomat
       min_size = asg.min_size
       asg.tags.each do |tag|
         tag = tag.to_h
-        min_size = tag[:value].to_i if tag[:key] == "#{ORG_PREFIX}:min_size"
+        min_size = tag[:value].to_i if tag[:key] == "#{@org_prefix}:min_size"
       end
 
       @client.update_auto_scaling_group(
@@ -250,7 +454,7 @@ module Deployomat
     def prevent_scale_in(asg)
       @client.update_auto_scaling_group(
         auto_scaling_group_name: asg.auto_scaling_group_name,
-        min_size: [asg.instances.length, asg.min_size].max
+        min_size: [[asg.instances.length, asg.min_size].max, asg.max_size].min
       )
     end
 
@@ -268,8 +472,8 @@ module Deployomat
       tags.each do |tag|
         REMOVE_TAG_PARAMS.each { |param| tag.delete(param) }
 
-        max_size = tag[:value].to_i if tag[:key] == "#{ORG_PREFIX}:max_size"
-        default_min_size = tag[:value].to_i if tag[:key] == "#{ORG_PREFIX}:min_size"
+        max_size = tag[:value].to_i if tag[:key] == "#{@org_prefix}:max_size"
+        default_min_size = tag[:value].to_i if tag[:key] == "#{@org_prefix}:min_size"
       end
 
       managed = tags.find { |tag| tag[:key] == 'Managed' }
@@ -278,6 +482,8 @@ module Deployomat
       else
         tags.push({ key: 'Managed', value: MANAGED_TAG })
       end
+
+      max_size = max_size || DEFAULT_MAX_SIZE
 
       new_asg_parameters = {
         auto_scaling_group_name: name,
@@ -294,12 +500,16 @@ module Deployomat
         termination_policies: template_asg.termination_policies,
         tags: tags,
         desired_capacity_type: template_asg.desired_capacity_type,
-        max_size: max_size || DEFAULT_MAX_SIZE,
-        min_size: [min_size.to_i, default_min_size.to_i, DEFAULT_MIN_SIZE].max,
+        max_size: max_size,
+        min_size: [[min_size.to_i, default_min_size.to_i].max, max_size].min
       }
 
       if target_group_arn
         new_asg_parameters[:target_group_arns] = [target_group_arn]
+      end
+
+      if template_asg.placement_group
+        new_asg_parameters[:placement_group] = template_asg.placement_group
       end
 
       @client.create_auto_scaling_group(new_asg_parameters)
@@ -333,9 +543,9 @@ module Deployomat
     REMOVE_MODIFY_RULE_PARAMS = %i[is_default priority].freeze
     PRIORITY_OFFSET = 40_000
 
-    def initialize(role_arn, deploy_id)
+    def initialize(config)
       @client = Aws::ElasticLoadBalancingV2::Client.new(
-        credentials: CredentialCache.role_credentials(role_arn, deploy_id)
+        credentials: CredentialCache.role_credentials(config.deploy_role_arn, config.deploy_id)
       )
     end
 
@@ -353,7 +563,7 @@ module Deployomat
 
       new_tg_conf[:tags] = tags
       @client.create_target_group(
-        new_tg_conf.merge(name: clone_name)
+        new_tg_conf.merge(name: clone_name.gsub(/[^A-Za-z0-9\-]/, '-')[0...32])
       ).target_groups.first
     end
 
@@ -467,6 +677,10 @@ module Deployomat
 
     def describe_rules(rule_arns)
       @client.describe_rules(rule_arns: rule_arns).rules
+    end
+
+    def delete_rule(rule_arn)
+      @client.delete_rule(rule_arn: rule_arn)
     end
 
   private
