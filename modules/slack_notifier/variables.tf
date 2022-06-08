@@ -43,12 +43,33 @@ variable "deploy_sfn" {
   description = "The deployment step functions state machine."
 }
 
+variable "cancel_sfn" {
+  type = object({
+    arn  = string
+    name = string
+  })
+  description = "The cancel step functions state machine."
+  default     = null
+}
+
 variable "undeploy_sfn" {
   type = object({
     arn  = string
     name = string
   })
   description = "The undeploy step functions state machine."
+}
+
+variable "custom_update_event_source" {
+  type        = string
+  description = "The custom event source used for in-progress update notifications"
+  default     = "omat.deploy.update"
+}
+
+variable "custom_update_event_detail_type" {
+  type        = string
+  description = "The custom event detail-type used for in-progress update notifications"
+  default     = "Deployomat Update"
 }
 
 variable "lambda_iam_role_arn" {

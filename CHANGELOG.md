@@ -1,3 +1,34 @@
+## 0.2.15
+
+ENHANCEMENTS:
+
+* Slack notifier now supports custom update events.
+* Slack notifier now optionally supports notifying on deploy cancels by setting the cancel_sfn input.
+
+## 0.2.14
+
+ENHANCEMENTS:
+
+* Support multiple deployer roles.
+
+## 0.2.13
+
+ENHANCEMENTS:
+
+* Updated IAM policies to allow Deployomat to read service logs for the service being deployed. This will be used by the Zookeeper Deployomat.
+
+## 0.2.12
+
+BUG FIXES:
+
+* Resolve circular dependency introduced by 0.2.11 by splitting lambda related permissions into a separate policy.
+
+## 0.2.11
+
+BUG FIXES:
+
+* Ensure that DeployomatStates IAM policy for DeployomatStates role is attached before attempting to create state machines with DeployomatStates states role.
+
 ## 0.2.10
 
 ENHANCEMENTS:

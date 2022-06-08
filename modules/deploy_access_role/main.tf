@@ -59,6 +59,12 @@ data "aws_iam_policy_document" "allow-deployomat-assume" {
       variable = "aws:PrincipalTag/Service"
       values   = [var.deployomat_service_name]
     }
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["ServiceName", "ServiceLogName"]
+    }
   }
 }
 
@@ -254,6 +260,23 @@ data "aws_iam_policy_document" "allow-deploy" {
       test     = "Bool"
       variable = "aws:ViaAWSService"
       values   = ["true"]
+    }
+  }
+
+  statement {
+    actions = [
+      "logs:FilterLogEvents"
+    ]
+
+    resources = [
+      "arn:aws:logs:*:*:log-group:/${var.organization_prefix}/server/&{aws:PrincipalTag/Environment}/service/&{aws:PrincipalTag/ServiceLogName}:log-stream:",
+      "arn:aws:logs:*:*:log-group:/${var.organization_prefix}/server/&{aws:PrincipalTag/Environment}/service/&{aws:PrincipalTag/ServiceLogName}/*:log-stream:",
+    ]
+
+    condition {
+      test     = "StringLike"
+      variable = "aws:PrincipalTag/ServiceLogName"
+      values   = ["?*"]
     }
   }
 }
