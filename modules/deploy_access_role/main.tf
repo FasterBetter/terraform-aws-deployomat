@@ -65,6 +65,12 @@ data "aws_iam_policy_document" "allow-deployomat-assume" {
       variable = "aws:TagKeys"
       values   = ["ServiceName", "ServiceLogName"]
     }
+
+    condition {
+      test     = "StringEquals"
+      variable = "sts:ExternalId"
+      values   = [var.external_id]
+    }
   }
 }
 
