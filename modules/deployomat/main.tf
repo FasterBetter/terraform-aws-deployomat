@@ -373,7 +373,7 @@ resource "aws_lambda_function" "deployomat-cancel" {
       DEPLOYOMAT_ENV           = local.environment,
       DEPLOYOMAT_TABLE         = aws_dynamodb_table.state.name
       DEPLOYOMAT_SERVICE_NAME  = local.service
-      ARN_EXTERNAL_ID          = var.external_id
+      ROLE_EXTERNAL_ID         = var.external_id
     }
   }
 
@@ -407,7 +407,7 @@ resource "aws_lambda_function" "deployomat-deploy" {
       UNDEPLOY_SFN_ARN         = aws_sfn_state_machine.undeploy.arn
       UNDEPLOYER_ROLE_ARN      = aws_iam_role.automatic-undeployer.arn
       DEPLOYOMAT_AMI_SEARCH_OWNERS = local.ami_owner_account_ids
-      ARN_EXTERNAL_ID          = var.external_id
+      ROLE_EXTERNAL_ID         = var.external_id
     }
   }
 
@@ -438,7 +438,7 @@ resource "aws_lambda_function" "deployomat-undeploy" {
       DEPLOYOMAT_ENV           = local.environment,
       DEPLOYOMAT_TABLE         = aws_dynamodb_table.state.name
       DEPLOYOMAT_SERVICE_NAME  = local.service
-      ARN_EXTERNAL_ID          = var.external_id
+      ROLE_EXTERNAL_ID         = var.external_id
     }
   }
 
