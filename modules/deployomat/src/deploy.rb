@@ -17,6 +17,10 @@
 require_relative 'lib'
 
 module Deployomat
+  ACTIVE_DEPLOY_MSG = "Asserting active deploy"
+  NOT_ACTIVE_MSG = "No longer active deploy."
+  ACTIVE_ASSERT_MSG = "Asserted active"
+
   class StartDeploy
     extend Forwardable
 
@@ -28,7 +32,7 @@ module Deployomat
 
     def_delegators :@config, :account_name, :service_name, :prefix, :deploy_id, :params
 
-    attr_reader :ami_id, :new_asg_name, :bake_time, :health_timeout,
+    attr_reader :ami_id, :new_asg_name, :bake_time, :health_timeout, :new_tg_name,
                 :traffic_shift_per_step, :wait_per_step, :allow_undeploy, :automatic_undeploy_minutes
 
     GREATER_THAN_ZERO = %i[bake_time traffic_shift_per_step wait_per_step health_timeout].freeze
@@ -38,6 +42,7 @@ module Deployomat
       @config = config
       @ami_id = ami_id
       @new_asg_name = "#{service_name}-#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}"
+      @new_tg_name = "#{service_name[0...15]}-#{Time.now.utc.strftime("%Y%m%dT%H%M%SZ")}"
 
       # TODO: These should be configurable.
       @bake_time = deploy_config.fetch('BakeTime', DEFAULT_BAKE_TIME)
@@ -128,7 +133,7 @@ module Deployomat
       new_target_group_arn = nil
       if exemplar_tg_arn
         puts "Cloning target group..."
-        new_target_group = elbv2.clone_target_group(exemplar_tg_arn, new_asg_name)
+        new_target_group = elbv2.clone_target_group(exemplar_tg_arn, new_tg_name)
         new_target_group_arn = new_target_group.target_group_arn
         puts "Cloned target group #{new_target_group_arn}"
       end
@@ -150,14 +155,14 @@ module Deployomat
 
 
       if production_asg
-        puts "Asserting active deploy"
+        puts ACTIVE_DEPLOY_MSG
         begin
           @config.assert_active
         rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
-          error "No longer active deploy."
+          error NOT_ACTIVE_MSG
           return error_response
         end
-        puts "Asserted active"
+        puts ACTIVE_ASSERT_MSG
         puts "Preventing scale-in of #{production_asg.auto_scaling_group_name}"
         asg.prevent_scale_in(production_asg)
       end
@@ -167,14 +172,14 @@ module Deployomat
       if exemplar_tg_arn
         production_rules = []
         listeners = params.get_list_or_json("#{prefix}/config/#{service_name}/listener_arns")
-        listeners.each do |(key, listener)|
+        production_rules = listeners.flat_map do |(key, listener)|
           if !listener
             listener = key
             key = nil
           end
 
-          puts "Preparing deploy rule for #{key} listener #{listener}..."
-          production_rules << elbv2.prepare_deploy_rule(
+          puts "Preparing deploy rules for #{key} listener #{listener}..."
+          elbv2.prepare_deploy_rules(
             listener, production_tg_arn, exemplar_tg_arn, new_target_group_arn
           )
         end
@@ -264,14 +269,14 @@ module Deployomat
     def call
       elbv2 = ElbV2.new(@config)
 
-      puts "Asserting active deploy"
+      puts ACTIVE_DEPLOY_MSG
       begin
         @config.assert_active
       rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
-        puts "No longer active deploy."
+        puts NOT_ACTIVE_MSG
         return { Status: :deploy_aborted }
       end
-      puts "Asserted active"
+      puts ACTIVE_ASSERT_MSG
 
       healthy_count = elbv2.count_healthy(target_group_arn)
       puts "Waiting for #{min_healthy} healthy instances, have #{healthy_count}"
@@ -310,14 +315,14 @@ module Deployomat
 
       total = progress + step_size
       production_rules.each do |rule|
-        puts "Asserting active deploy"
+        puts ACTIVE_DEPLOY_MSG
         begin
           @config.assert_active
         rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
-          puts "No longer active deploy."
+          puts NOT_ACTIVE_MSG
           return { Status: :deploy_aborted }
         end
-        puts "Asserted active"
+        puts ACTIVE_ASSERT_MSG
         elbv2.shift_traffic(rule, step_size, old_target_group_arn, target_group_arn)
         puts "Shifted traffic on #{rule.rule_arn} to #{total}%"
       end
@@ -348,14 +353,14 @@ module Deployomat
       production_rules = elbv2.describe_rules(rule_ids)
 
       production_rules.each do |rule|
-        puts "Asserting active deploy"
+        puts ACTIVE_DEPLOY_MSG
         begin
           @config.assert_active
         rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
-          puts "No longer active deploy."
+          puts NOT_ACTIVE_MSG
           return { Status: :deploy_aborted }
         end
-        puts "Asserted active"
+        puts ACTIVE_ASSERT_MSG
         elbv2.coalesce(rule, target_group_arn)
         puts "Coalesced traffic on #{rule.rule_arn}"
       end
@@ -403,14 +408,14 @@ module Deployomat
     def call
       asg = Asg.new(@config)
 
-      puts "Asserting active deploy"
+      puts ACTIVE_DEPLOY_MSG
       begin
         @config.assert_active
       rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
-        puts "No longer active deploy."
+        puts NOT_ACTIVE_MSG
         return { Status: :deploy_aborted }
       end
-      puts "Asserted active"
+      puts ACTIVE_ASSERT_MSG
 
       deploy_asg = asg.get(@config.deploy_asg)
       puts "Allowing scale-in of new ASG #{deploy_asg.auto_scaling_group_name}"
