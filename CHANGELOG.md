@@ -1,3 +1,98 @@
+## 0.3.7
+
+ENHANCEMENTS:
+
+* Add elasticloadbalancing:AddTags IAM permission to deploy_access_role to comply with upcoming AWS security changes.
+
+## 0.3.6
+
+BUG FIXES:
+
+* Actually retry ASG creation.
+
+## 0.3.5
+
+BUG FIXES:
+
+* Fix exception when retrying ASG creation.
+
+## 0.3.4
+
+ENHANCEMENTS:
+
+* Now supports AutoScaling Group metrics.
+
+## 0.3.3
+
+ENHANCEMENTS:
+
+* Retry creating AutoScaling Group.
+
+## 0.3.2
+
+ENHANCEMENTS:
+
+* Permit longer names for automatic undeployment rules to minimize conflicts.
+
+## 0.3.1
+
+BUG FIXES:
+
+* Cancelling a deploy of a web service during its Bake period now correctly rolls back to the previous production deploy.
+
+## 0.3.0
+
+ENHANCEMENTS:
+
+* Deploy, undeploy, and cancel now support services which have multiple load balancer rules directing traffic to them.
+
+## 0.2.22
+
+ENHANCEMENTS:
+
+* Target group attributes (deregistration delay, stickiness, load balancing algorithm) are now supported.
+
+## 0.2.21
+
+BUG FIXES:
+
+* Syntax error.
+
+## 0.2.20
+
+BUG FIXES:
+
+* Limit length of target group name, but better.
+
+## 0.2.19
+
+BUG FIXES:
+
+* Limit length of ASG/target group names to avoid naming conflicts.
+
+## 0.2.18
+
+BUG FIXES:
+
+* Limit length of automatic undeploy rule name, but better.
+
+## 0.2.17
+
+BUG FIXES:
+
+* Limit length of automatic undeploy rule name.
+
+## 0.2.16
+
+BUG FIXES:
+
+* Fixed language for starting undeployment slack notification.
+* Support external id when assuming roles ([#2](https://github.com/GoCarrot/terraform-aws-deployomat/pull/2))
+
+SPECIAL THANKS:
+
+* [@MrJoy](https://github.com/MrJoy)
+
 ## 0.2.15
 
 ENHANCEMENTS:
